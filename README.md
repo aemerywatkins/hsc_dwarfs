@@ -9,4 +9,4 @@ Some demo notebooks are available in this home directory, as well as a stamp ima
  - `masked.fits`: an example stamp used by the two notebooks, with masks applied by-hand and set to -999 counts.
  - `requirements.txt`: my full list of Anaconda packages, for easier compatibility.
 
-If you don't want to install dependencies individually, create a distinct Anaconda environment for this package by doing the following: $ conda create --name <env> --file requirements.txt
+If you don't want to install dependencies individually, create a distinct Anaconda environment for this package by doing the following: $ conda create --name `envname` --file requirements.txt
