@@ -13,8 +13,9 @@ from scipy.interpolate import interp1d
 from photutils import centroids
 from photutils import isophote
 import matplotlib.pyplot as plt
-# from . import utils
-import utils
+import warnings
+from . import utils
+# import utils
 
 
 class DerivedValues():
@@ -23,8 +24,26 @@ class DerivedValues():
     surface photometry
     '''
 
-    def __init__(self, isoList, magZp=27.0, pxScale=0.17):
-        self.isoList = isoList
+    def __init__(self, isoTable, magZp=27.0, pxScale=0.17):
+        '''
+        Parameters
+        ----------
+        isoTable : astropy.table.table.Table
+            Table (or dictionary with the proper keys) of isophotal fit params
+        magZp : float, optional
+            Photometric zeropoint to conver to mags. The default is 27.0.
+        pxScale : float, optional
+            Pixel scale in arcsec/px. The default is 0.17.
+
+        Returns
+        -------
+        None.
+
+        '''
+        if 'tflux_e' not in isoTable.keys():
+            warnings.warn("Use isoList.to_table(columns='all'),"
+                          + "or failures will ensue.")
+        self.isoTable = isoTable
         self.magZp = magZp
         self.pxScale = pxScale
 
@@ -71,8 +90,8 @@ class DerivedValues():
         mags : numpy.ndarray
             Total magnitude enclosed within sma
         '''
-        sma = self.isoList.sma
-        tflux = self.isoList.tflux_e - self.isoList.ndata*sky
+        sma = self.isoTable['sma']
+        tflux = self.isoTable['tflux_e'] - self.isoTable['npix_e']*sky
         mags = -2.5*np.log10(tflux) + self.magZp
 
         return sma, mags
@@ -126,8 +145,8 @@ class DerivedValues():
         findFlux = totalFlux * fluxFrac
 
         # A little crude, but we interpolate to improve the radius resolution
-        sma, cog = self.interpolateCurve(self.isoList.sma,
-                                         self.isoList.tflux_e)
+        sma, cog = self.interpolateCurve(self.isoTable['sma'],
+                                         self.isoTable['tflux_e'])
 
         idx = utils.findNearest(cog, findFlux)
         fracRad = sma[idx]
@@ -174,8 +193,8 @@ class DerivedValues():
         '''
         rEff = self.fractionalRadius(totalMag, 0.5)
 
-        sma, cog = self.interpolateCurve(self.isoList.sma,
-                                         self.isoList.tflux_e)
+        sma, cog = self.interpolateCurve(self.isoTable['sma'],
+                                         self.isoTable['tflux_e'])
 
         idx = utils.findNearest(sma, rEff)
         idy = utils.findNearest(sma, alpha*rEff)
@@ -201,13 +220,16 @@ class DerivedValues():
         -------
         radPetro : float
             Petrosian radius in pixels
+
+        NOTE: quick check, for an exponential profile, R_petrosian ~
+        2x R_eff.
         '''
-        sma, sb = self.interpolateCurve(self.isoList.sma,
-                                        self.isoList.intens)
-        __, cog = self.interpolateCurve(self.isoList.sma,
-                                        self.isoList.tflux_e)
-        __, area = self.interpolateCurve(self.isoList.sma,
-                                         self.isoList.ndata)
+        sma, sb = self.interpolateCurve(self.isoTable['sma'],
+                                        self.isoTable['intens'])
+        __, cog = self.interpolateCurve(self.isoTable['sma'],
+                                        self.isoTable['tflux_e'])
+        __, area = self.interpolateCurve(self.isoTable['sma'],
+                                         self.isoTable['npix_e'])
         petrosian = sb * (area/cog)
         idx = utils.findNearest(petrosian, 0.2)
 
@@ -334,8 +356,51 @@ class Profile():
             x, y, = iso.sampled_coordinates()
             plt.plot(x, y, color='w', markersize=0.5)
 
+    def toTable(self, isoList):
+        '''
+        Because the isoList.to_table() function adds None values to some of
+        these columns, which screws everything up, we replace those with
+        some slightly more reasonable values and output a table that way.
 
-def measureImageNoise(maskedImageArray, galX, galY, galRad, halfBoxWidth=10):
+        Parameters
+        ----------
+        isoList : hotutils.isophote.ellipse.Ellipse.isolist
+            Class instance containing isophotal parameters
+
+        Returns
+        -------
+        isoTab : astropy.table.table.Table
+            isoList converted to a table format for easier storage
+        '''
+        isoTab = isoList.to_table(columns='all')
+        isoTab['tflux_e'][0] = isoTab['intens'][0]
+        isoTab['tflux_e'] = np.array(isoTab['tflux_e'], dtype=float)
+        isoTab['tflux_c'][0] = isoTab['intens'][0]
+        isoTab['tflux_c'] = np.array(isoTab['tflux_c'], dtype=float)
+        isoTab['npix_e'][0] = 1
+        isoTab['npix_e'] = np.array(isoTab['npix_e'], dtype=float)
+        isoTab['npix_c'][0] = 1
+        isoTab['npix_c'] = np.array(isoTab['npix_c'], dtype=float)
+        isoTab['rms'][0] = 0
+        isoTab['rms'] = np.array(isoTab['rms'], dtype=float)
+        isoTab['pix_stddev'][0] = 0
+        isoTab['pix_stddev'] = np.array(isoTab['pix_stddev'], dtype=float)
+        isoTab['grad_error'][0] = 0
+        isoTab['grad_error'] = np.array(isoTab['grad_error'], dtype=float)
+        isoTab['grad_rerror'][0] = 0
+        isoTab['grad_rerror'] = np.array(isoTab['grad_rerror'], dtype=float)
+        isoTab['sarea'][0] = isoTab['sarea'][1]
+        isoTab['sarea'] = np.array(isoTab['sarea'], dtype=float)
+
+        return isoTab
+
+
+def measureImageNoise(maskedImageArray,
+                      galX,
+                      galY,
+                      galRad,
+                      halfBoxWidth=10,
+                      seed=None):
     '''
     Outputs metrics for the background noise and flux.
 
@@ -352,6 +417,8 @@ def measureImageNoise(maskedImageArray, galX, galY, galRad, halfBoxWidth=10):
     halfBoxWidth : int, optional
         Half the desired width of the boxes used to calculate the noise.
         The default is 10.
+    seed : int, optional
+        A seed for the random generator, for testing purposes
 
     Returns
     -------
@@ -365,7 +432,7 @@ def measureImageNoise(maskedImageArray, galX, galY, galRad, halfBoxWidth=10):
         Median of the median values within N=1000 randomly distributed boxes,
         ignoring masked pixels
     '''
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
     # Need to avoiding actually altering the image and mask used
     if type(maskedImageArray) == np.ma.core.MaskedArray:
         data = np.zeros(maskedImageArray.shape) + maskedImageArray.data
