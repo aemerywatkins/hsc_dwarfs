@@ -470,8 +470,7 @@ def measureImageNoise(maskedImageArray,
 
 
 def interpolateAcrossMasks(maskedImageArray,
-                           x0, y0, maxRad, pa, ellip,
-                           rms, ampCut=0.01):
+                           x0, y0, maxRad, pa, ellip, rms):
     '''
     Replaces masked pixels in an image out to a certain radius with an FFT
     recreation of an elliptical aperture within that masked region, plus some
@@ -495,9 +494,6 @@ def interpolateAcrossMasks(maskedImageArray,
     rms : float
         Amount of noise to add to each replacement flux value.  Added as
         draw from standard normal N(0, rms)
-    ampCut : float, optional
-        DFT amplitude below which to ignore contribution from spectrum.
-        Default is 0.01.
 
     Returns
     -------
@@ -543,16 +539,12 @@ def interpolateAcrossMasks(maskedImageArray,
 
         # Now Interpolate across masked pixels
         nans = np.isnan(sort_flux)
-        f = interp1d(sort_angle[~nans], sort_flux[~nans], kind='cubic')
+        f = interp1d(sort_angle[~nans], sort_flux[~nans], kind='slinear')
         new_flux = f(sort_angle)
 
         # Derive the DFT
         dft = np.fft.fft(new_flux)
-        amp = np.sqrt(dft.real**2 + dft.imag**2)/len(dft)
-        # Suppress low-amplitude frequencies
-        # Maybe better to cut a specific range...?  This fails in the BG.
-        low_amp = amp <= ampCut
-        dft[low_amp] *= 0
+        dft[5:-5] = 0  # Flattening out high frequencies
         smooth_flux = np.fft.ifft(dft)
 
         # Now replace masked pixels with interpolated ones
