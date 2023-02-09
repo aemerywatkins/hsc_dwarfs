@@ -516,7 +516,7 @@ def interpolateAcrossMasks(maskedImageArray,
         __, __, ellRad, theta = utils.reprojectToEllipse(image,
                                                          x0,
                                                          y0,
-                                                         np.radians(pa),
+                                                         pa,
                                                          ellip)
         wantRad = (ellRad <= rads[i]) & (ellRad >= rads[i-1])
         maskRing = mask[wantRad]
