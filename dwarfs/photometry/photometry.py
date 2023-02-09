@@ -533,6 +533,14 @@ def interpolateAcrossMasks(maskedImageArray,
         sort_flux = flux[idx]
         sort_angle = angle[idx]
 
+        # Need maximum and minimum in masked arrays to be full angle range
+        if np.isnan(sort_flux[0]):
+            # Replacing with the mean of the first five non-NaN values
+            sort_flux[0] = np.mean(sort_flux[~np.isnan(sort_flux)][: 6])
+        if np.isnan(sort_flux[-1]):
+            # Replacing with the mean of last five non-NaN values
+            sort_flux[-1] = np.mean(sort_flux[~np.isnan(sort_flux)][-5:])
+
         # Now Interpolate across masked pixels
         nans = np.isnan(sort_flux)
         f = interp1d(sort_angle[~nans], sort_flux[~nans], kind='cubic')
