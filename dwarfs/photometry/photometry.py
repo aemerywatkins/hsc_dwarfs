@@ -506,14 +506,14 @@ def interpolateAcrossMasks(maskedImageArray,
     image = maskedImageArray.data
     rads = np.arange(0, maxRad+1)
 
+    __, __, ellRad, theta = utils.reprojectToEllipse(image,
+                                                     x0,
+                                                     y0,
+                                                     pa,
+                                                     ellip)
     for i in range(len(rads)):
         if i == 0:
             continue
-        __, __, ellRad, theta = utils.reprojectToEllipse(image,
-                                                         x0,
-                                                         y0,
-                                                         pa,
-                                                         ellip)
         wantRad = (ellRad <= rads[i]) & (ellRad >= rads[i-1])
         maskRing = mask[wantRad]
         if len(maskRing[maskRing]) == 0:
@@ -528,6 +528,7 @@ def interpolateAcrossMasks(maskedImageArray,
         idx = np.argsort(angle)
         sort_flux = flux[idx]
         sort_angle = angle[idx]
+        old_nans = np.isnan(sort_flux)
 
         # Need maximum and minimum in masked arrays to be full angle range
         if np.isnan(sort_flux[0]):
@@ -545,13 +546,13 @@ def interpolateAcrossMasks(maskedImageArray,
         # Derive the DFT
         dft = np.fft.fft(new_flux)
         dft[5:-5] = 0  # Flattening out high frequencies
-        smooth_flux = np.fft.ifft(dft)
+        smooth_flux = np.fft.ifft(dft).real
 
         # Now replace masked pixels with interpolated ones
         nanIdx = np.array([np.where(angle == i)[0][0]
-                           for i in sort_angle[nans]])
+                           for i in sort_angle[old_nans]])
         noise = rng.normal(0, rms, size=len(nanIdx))
-        flux[nanIdx] = smooth_flux.real[nans] + noise  # Add noise
+        flux[nanIdx] = smooth_flux.real[old_nans] + noise  # Add noise
         image[wantRad] = flux
     unmaskedImage = image
 
