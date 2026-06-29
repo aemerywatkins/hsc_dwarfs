@@ -14,26 +14,29 @@ from photutils import centroids
 from photutils import isophote
 import matplotlib.pyplot as plt
 import warnings
-from . import utils
-# import utils
+# from . import utils
+import utils
 
 
 class DerivedValues():
     '''
-    A class with functions for computing galaxies properties derived from
+    A class with functions for computing galaxy properties derived from
     surface photometry
     '''
 
-    def __init__(self, isoTable, magZp=27.0, pxScale=0.17):
+    def __init__(self, isoTable, sky=0, magZp=27.0, pxScale=0.167):
         '''
         Parameters
         ----------
-        isoTable : astropy.table.table.Table
+        isoTable : `astropy.table.table.Table`
             Table (or dictionary with the proper keys) of isophotal fit params
-        magZp : float, optional
+        sky : `float`, optional
+            Estimate of the average sky flux local to the galaxy.
+            The default is 0.
+        magZp : `float`, optional
             Photometric zeropoint to conver to mags. The default is 27.0.
-        pxScale : float, optional
-            Pixel scale in arcsec/px. The default is 0.17.
+        pxScale : `float`, optional
+            Pixel scale in arcsec/px. The default is 0.167.
 
         Returns
         -------
@@ -44,6 +47,7 @@ class DerivedValues():
             warnings.warn("Use isoList.to_table(columns='all'),"
                           + "or failures will ensue.")
         self.isoTable = isoTable
+        self.sky = sky
         self.magZp = magZp
         self.pxScale = pxScale
 
@@ -53,18 +57,22 @@ class DerivedValues():
 
         Parameters
         ----------
-        nElements : int
+        var1 : `numpy.ndarray`
+            Abscissa array
+        var2 : `numpy.ndarray`
+            Ordinate array
+        nElements : `int`
             Number of resolution elements for interpolated curve
-        kind : string
+        kind : `string`
             Interpolation type.  Valid values are: ‘linear’, ‘nearest’,
             ‘nearest-up’, ‘zero’, ‘slinear’, ‘quadratic’, ‘cubic’, ‘previous’,
             or ‘next’.
 
         Returns
         -------
-        high_res_var1 : numpy.ndarray
+        high_res_var1 : `numpy.ndarray`
             Variable 1 with resolution defined by nElements
-        high_res_var2 : numpy.ndarray
+        high_res_var2 : `numpy.ndarray`
             Variable 2 with resolution defined by nElements
         '''
         f = interp1d(var1, var2, kind=kind)
@@ -73,50 +81,85 @@ class DerivedValues():
 
         return high_res_var1, high_res_var2
 
-    def curveOfGrowth(self, sky=0):
+    def correctPa(self, thresh=130):
+        '''
+        Reverses large PA swings when PA~0 or ~180, sequentially.
+        
+        Parameters
+        ----------
+        thresh: `float`, optional
+            Threshold in degrees for swing correction.  The default value is
+            130 deg.
+        
+        Notes
+        -----
+        Acts on table object attached to class instance.
+        '''
+        for i in range(len(self.isoTable)-1):
+            # If difference from one radius to the next exceeds thresh, apply
+            # the appropriate 180 correction
+            dpa = self.isoTable["pa"][i+1] - self.isoTable["pa"][i]
+            if dpa > np.abs(thresh):
+                self.isoTable["pa"][i+1] -= 180
+            elif dpa < -np.abs(thresh):
+                self.isoTable["pa"][i+1] += 180
+
+    def curveOfGrowth(self):
         '''
         Produces a curve of growth in magnitudes
 
-        Parameters
-        ----------
-        sky : float, optional
-            Estimate of the average sky flux local to the galaxy.
-            The default is 0.
-
         Returns
         -------
-        sma : numpy.ndarray
+        sma : `numpy.ndarray`
             Semi-major-axis array, in pixels
-        mags : numpy.ndarray
+        mags : `numpy.ndarray`
             Total magnitude enclosed within sma
         '''
         sma = self.isoTable['sma']
-        tflux = self.isoTable['tflux_e'] - self.isoTable['npix_e']*sky
+        tflux = self.isoTable['tflux_e'] - self.isoTable['npix_e']*self.sky
         mags = -2.5*np.log10(tflux) + self.magZp
 
         return sma, mags
 
-    def totalMagnitude(self, sma, mags):
+    def surfaceBrightnessProfile(self):
+        '''
+        Converts from linear to magnitude surface brightness profile
+
+        Returns
+        -------
+        mu : `numpy.ndarray`
+            Surface brightness in units of magnitude/arcsec^2
+        '''
+        mu = -2.5*np.log10(self.isoTable["intens"] - self.sky) \
+            + self.magZp \
+            + 2.5*np.log10(self.pxScale**2)
+
+        return mu
+
+    def totalMagnitude(self, sma, mags, slopeBound=-0.008):
         '''
         Computes total magnitude of galaxy using curve of growth
 
         Parameters
         ----------
-        sma : numpy.ndarray
+        sma : `numpy.ndarray`
             Semi-major-axis array, in pixels
-        mags : numpy.ndarray
+        mags : `numpy.ndarray`
             Total magnitude enclosed within sma
 
         Returns
         -------
-        totalMag : float
+        totalMag : `float`
             Total magnitude extrapolated to infinity
 
-        NOTE: fitting limits currently hard-coded, but proven effective for
-        exponential profiles
+        Notes
+        ------
+        -0.008 is typically acceptable for exponential profiles.  Other kinds
+        with higher Sersic index may require a different value.
+        Reference: Munoz-Mateos et al. (2015), ApJS, 219, 3
         '''
         slope = utils.localSlope(sma, mags)
-        want = (slope >= -0.008) & (slope <= 0)  # Typical useful range
+        want = (slope >= slopeBound) & (slope <= 0)
         fit = np.polyfit(slope[want], mags[want], 1)
         totalMag = fit[1]
 
@@ -129,22 +172,22 @@ class DerivedValues():
 
         Parameters
         ----------
-        totalMag : float
+        totalMag : `float`
             Galaxy total magnitude
-        fluxFrac : float, optional
+        fluxFrac : `float`, optional
             The desired fraction of enclosed light. The default is 0.5, i.e.
-            by defaul this returns the half-light radius.
+            by default this returns the half-light radius.
 
         Returns
         -------
-        fracRad : float
+        fracRad : `float`
             The radius containing the desired fraction of the galaxy's total
             light, in pixels
         '''
         totalFlux = 10**(-0.4*(totalMag - self.magZp))
         findFlux = totalFlux * fluxFrac
 
-        # A little crude, but we interpolate to improve the radius resolution
+        # Interpolate the curve to improve the derived radius resolution
         sma, cog = self.interpolateCurve(self.isoTable['sma'],
                                          self.isoTable['tflux_e'])
 
@@ -153,6 +196,134 @@ class DerivedValues():
 
         return fracRad
 
+    def muEffective(self, totalMag):
+        '''
+        Computes the mean surface brightness WITHIN one effective radius
+
+        Parameters
+        ----------
+        totalMag : `float`
+            Galaxy total magnitude
+
+        Returns
+        -------
+        muEff : `float`
+            Mean surface brightness within one effective radius, as derived
+            from the curve of growth, in mag/arcsec^2
+        '''
+        sma, i = self.interpolateCurve(self.isoTable['sma'],
+                                       self.isoTable['intens'])
+        rEff = self.fractionalRadius(totalMag)
+        iEff = np.nanmean(i[sma <= rEff])
+        muEff = -2.5*np.log10(iEff) \
+            + self.magZp \
+            + 2.5*np.log10(self.pxScale**2)
+
+        return muEff
+
+    def muAtR(self, totalMag, rad):
+        '''
+        Computes the surface brightness at a specified radius, e.g. AT the
+        effective radius
+
+        Parameters
+        ----------
+        totalMag : `float`
+            Galaxy total magnitude
+        rad : `float`
+            Radius at which to estimate the surface brightness
+
+        Returns
+        -------
+        muR : `float`
+            Surface brightness of the isophotes at radius rad, in mag/arcsec^2
+        '''
+        sma, i = self.interpolateCurve(self.isoTable['sma'],
+                                       self.isoTable['intens'])
+        idx = utils.findNearest(sma, rad)
+        muR = -2.5*np.log10(i[idx]) \
+            + self.magZp \
+            + 2.5*np.log10(self.pxScale**2)
+
+        return muR
+
+    def isophotalRadius(self, muIso, tol=0.1):
+        '''
+        Computes the radius at which the surface brightness profile reaches
+        some surface brightness value
+
+        Parameters
+        ----------
+        muIso : `float`
+            The desired surface brightness at which to measure the radius, in
+            mag/arcsec^2
+        tol : `float`, optional
+            Tolerance for acceptance.  If muIso from the curve is within
+            +/- tol of desired value, accept, but otherwise reject
+
+        Returns
+        -------
+        isoRad : `float`
+            The radius at which the surface brightness profiles reaches the
+            desired surface brightness value.  If not found within tol, returns
+            NaN (e.g. if the central surface brightness is fainter than the
+            desired isophote surface brightness)
+        '''
+        # Interpolate same as with other methods
+        mu = self.surfaceBrightnessProfile()
+        sma, mu = self.interpolateCurve(self.isoTable['sma'],
+                                        mu)
+
+        idx = utils.findNearest(mu, muIso)
+        good = (mu[idx] >= muIso - tol) & (mu[idx] <= muIso + tol)
+        if good:
+            isoRad = sma[idx]
+        else:
+            isoRad = np.nan
+
+        return isoRad
+
+    def isophotalRadiusDeproj(self, muIso, axRat, tol=0.1):
+        '''
+        As isophotalRadius, but deprojects the profile using the supplied axial
+        ratio
+
+        Parameters
+        ----------
+        muIso : `float`
+            The desired surface brightness at which to measure the radius, in
+            mag/arcsec^2
+        axRat : `float`
+            Axial ratio (b/a) of the projected isophote shapes
+        tol : `float`, optional
+            Tolerance for acceptance.  If muIso from the curve is within
+            +/- tol of desired value, accept, but otherwise reject
+
+        Returns
+        -------
+        isoRad : `float`
+            The radius at which the surface brightness profiles reaches the
+            desired surface brightness value
+        '''
+        # Interpolate same as with other methods
+        iProj = self.isoTable["intens"]
+        iDeproj = iProj * axRat
+        mu = -2.5*np.log10(iDeproj)\
+            + self.magZp\
+            + 2.5*np.log10(self.pxScale**2)
+        sma, mu = self.interpolateCurve(self.isoTable['sma'],
+                                        mu)
+
+        idx = utils.findNearest(mu, muIso)
+        isoRad = sma[idx]
+        good = (mu[idx] >= muIso - tol) & (mu[idx] <= muIso + tol)
+        if good:
+            isoRad = sma[idx]
+        else:
+            isoRad = np.nan
+
+        return isoRad
+
     def concentration82(self, totalMag):
         '''
         Derives the concentration parameter C discussed by Conselice (2003),
@@ -160,12 +331,12 @@ class DerivedValues():
 
         Parameters
         ----------
-        totalMag : float
+        totalMag : `float`
             Galaxy total magnitude
 
         Returns
         -------
-        c82 : float
+        c82 : `float`
             The concentration parameter C = 5log(R80/R20)
         '''
         r80 = self.fractionalRadius(totalMag, 0.8)
@@ -181,15 +352,15 @@ class DerivedValues():
 
         Parameters
         ----------
-        totalMag : float
+        totalMag : `float`
             Galaxy total magnitude
-        alpha : float
-            Factor by which to define outer isophote level, as alpha*rEff
+        alpha : `float`
+            Factor by which to define outer isophote level, as alpha*R_eff
 
         Returns
         -------
-        cRe : float
-            The concentration parameter sum(I[<alpha*Reff])/sum(I[<Reff])
+        cRe : `float`
+            The concentration parameter sum(I[<alpha*R_eff])/sum(I[<R_eff])
         '''
         rEff = self.fractionalRadius(totalMag, 0.5)
 
@@ -212,13 +383,13 @@ class DerivedValues():
 
         Parameters
         ----------
-        eta : float, optional
+        eta : `float`, optional
             Value of Petrosian index used to define Petrosian radius.
             The default is 0.2 (Bershady et al. 2000)
 
         Returns
         -------
-        radPetro : float
+        radPetro : `float`
             Petrosian radius in pixels
 
         NOTE: quick check, for an exponential profile, R_petrosian ~
@@ -234,7 +405,203 @@ class DerivedValues():
         idx = utils.findNearest(petrosian, 0.2)
 
         radPetro = sma[idx]
+
         return radPetro
+
+    def lumWeight(self, param):
+        '''Estimates the luminosity-weighted mean value of the input parameter,
+        taking into account profile ellipticity changes vs. radius
+
+        Parameters
+        ----------
+        param : `string`
+            Table column name of the parameter to measure
+
+        Returns
+        -------
+        q : `numpy.ndarray`
+            Axial ratio array (1 - ellipticity)
+        La0 : `numpy.ndarray`
+            Total luminosity derived from ellipticity-corrected surface
+            brightness profile
+        lumWtParam : `numpy.ndarray`
+            Mean value of the parameter normalized by the total luminosity
+        
+        Notes
+        -----
+        Source: Ryden et al. (1999), ApJ, 517, 650
+        '''
+        # Estimating total luminosity
+        q = 1 - self.isoTable["ellipticity"]
+        dqda = np.diff(np.log(q)) / np.diff(np.log(self.isoTable["sma"]))
+        dqda = np.append(np.log(q[0]) / np.log(self.isoTable["sma"][0]), dqda)
+        dA = 2*np.pi * q * self.isoTable["sma"] * (1 + 0.5*dqda)
+        La0 = np.trapezoid(self.isoTable["intens"]*dA,
+                           x=self.isoTable["sma"])
+
+        # Estimating luminosity-weighted parameter value
+        integral = np.trapezoid(self.isoTable[param]
+                                * self.isoTable["intens"] * dA,
+                                x=self.isoTable["sma"])
+        lumWtParam = integral / La0
+
+        return q, La0, lumWtParam
+
+    def paramLimits(self, param, skyNoise, minSN=2, innerSma=1.2):
+        '''
+        Derives the maximum, minimum, and median values of a chosen parameter
+        outside of some radius boundary and within a surface brightness limit
+
+        Parameters
+        ----------
+        param : `string`
+            Table column name of the parameter to measure
+        skyNoise : `float`
+            Estimated per-pixel noise in sky background, in counts
+        minSN : `float`, optional
+            The minimum S/N value in flux out to which to calculate the
+            parameter.  The default value is 2.
+        innerSma : `float`, optional
+            Innermost semi-major axis cutoff, in arcseconds; everything inside
+            here is ignored for parameter measurement.  The default value is
+            1.2".
+
+        Returns
+        -------
+        maxParam : `float`
+            Maximum value of the parameter within chosen boundaries
+        maxParam : `float`
+            Minimum value of the parameter within chosen boundaries
+        medParam : `float`
+            Median value of the parameter within chosen boundaries
+        '''
+        innerSma /= self.pxScale  # Attached table is in pixels
+        noise = np.sqrt(
+            self.isoTab["int_err"]**2
+            + (skyNoise / np.sqrt(self.isoTable["npix"]))**2
+            )
+        want = (self.isoTab["sma"] >= innerSma) \
+            & (self.isoTable["intens"]/noise >= minSN)
+
+        maxParam = np.nanmax(self.isoTable[param][want])
+        minParam = np.nanmin(self.isoTable[param][want])
+        medParam = np.nanmedian(self.isoTable[param][want])
+
+        return maxParam, minParam, medParam
+
+    def maxDeltaPa(self, skyNoise, minSN=2, innerSma=1.2, thresh=130):
+        '''
+        Derives the maximum change in position angle across a radial PA
+        profile.
+        Avoids PSF-convolved inner isophotes, and only until a provided surface
+        brightness limit. Excludes nearly round isophotes as well due to
+        uncertainty.
+
+        Parameters
+        ----------
+        skyNoise : `float`
+            Estimated per-pixel noise in sky background, in counts
+        minSN : `float`, optional
+            The minimum S/N value in flux out to which to calculate the
+            parameter.  The default value is 2.
+        innerSma : `float`, optional
+            Innermost semi-major axis cutoff, in arcseconds; everything inside
+            here is ignored for parameter measurement.  The default value is
+            1.2".
+        thresh: `float`, optional
+            Threshold in degrees for swing correction.  The default value is
+            130 deg.
+
+        Returns
+        -------
+        maxDelPa : `float`
+            Difference between the maximum and minimum value of position angle
+            outside of innerSma and within minSb
+        '''
+        innerSma /= self.pxScale  # Work in pixels
+        noise = np.sqrt(
+            self.isoTab["int_err"]**2
+            + (skyNoise / np.sqrt(self.isoTable["npix"]))**2
+            )
+        want = (self.isoTab["sma"] >= innerSma) \
+            & (self.isoTable["intens"]/noise >= minSN) \
+            & (self.isoTable["ellipticity"] >= 0.1)    # From Busko et al. 1996
+
+        self.correctPa(self.isoTable["pa"], thresh)  # Ignore 180 flips
+        maxDelPa = np.nanmax(self.isoTable["pa"][want]) \
+            - np.nanmin(self.isoTable["pa"][want])
+
+        return maxDelPa
+
+    def twistiness(self, skyNoise, minSN=2, innerSma=1.2, flag=False):
+        '''
+        Derives the twistiness parameter defined by Ryden et al. 1999.
+        We define the fiducial radius based on the provided surface brightness
+        limit, and ignore the central PSF-convolved regions.
+
+        Parameters
+        ----------
+        skyNoise : `float`
+            Estimated per-pixel noise in sky background, in counts
+        minSN : `float`, optional
+            The minimum S/N value in flux out to which to calculate the
+            parameter.  The default value is 2.
+        innerSma : `float`, optional
+            Innermost semi-major axis cutoff, in arcseconds; everything inside
+            here is ignored for parameter measurement.  The default value is
+            1.2".
+        flag : `bool`, optional
+            If true, returns the integral array, for visualisation and
+            debugging purposes.  The default value is False.
+
+        Returns
+        -------
+        T : `float`
+            Twistiness parameter measured within chosen limits
+
+        Notes
+        -----
+        CAUTION: modifies self.isoTable in-place via boolean selection!
+        
+        Reference: Ryden et al. (1999), ApJ, 517, 650
+        '''
+        # Works in sine and cosine; no need to correct for PA swings
+        innerSma /= self.pxScale  # Work in pixels
+        
+        # Reject NaN values in the calculation
+        # Calculate noise array for S/N cut
+        noise = np.sqrt(
+            self.isoTable["int_err"]**2 
+            + (skyNoise / np.sqrt(self.isoTable["npix"]))**2
+            )
+        wantRad = (self.isoTable["sma"] >= innerSma) \
+            & (self.isTable["intens"] / noise >= minSN)
+        wantFinite = np.isfinite(self.isoTab["eps"]) \
+            & np.isfinite(self.isoTable["pa"]) \
+            & np.isfinite(self.isoTable["pa_err"])
+        wantPaErr = self.isoTable["eps"] >= 0.1  # From Busko et al. 1996
+        want = wantRad & wantFinite & wantPaErr
+
+        sma = self.isoTable["sma"][want]
+        intens = self.isoTable["intens"][want]
+        ellip = self.isoTable["eps"][want]
+        pa = self.isoTable["pa"][want]
+    
+        q, La0, phiAv = self.lumWeight(sma, intens, ellip, pa)
+
+        # Now calculating T, the twistiness parameter
+        gamma = np.radians(pa) - np.radians(phiAv)
+        dIda = np.diff(intens) / np.diff(sma)
+        # My own derivation... original paper has a typo in the LaTeX file.
+        quant = np.sqrt((np.sin(gamma)**2/q**2) + np.cos(gamma)**2) - 1
+        C = dIda * sma[1:] * quant[1:]
+        tInt = np.trapezoid(np.abs(C) * sma[1:], x=sma[1:])
+        T = ((2*np.pi)/La0) * tInt
+    
+        if not flag:
+            return T
+        else:
+            return T, np.abs(C) * sma[1:], sma[1:]
 
 
 class Profile():
@@ -249,36 +616,51 @@ class Profile():
         format.
 
         Give it a masked array if you want to ignore pixels
-        (numpy.ma.masked_array)
+        (numpy.ma.masked_array).
+        
+        Parameters
+        ----------
+        imageArray : `numpy.ndarray` or `numpy.ma.core.MaskedArray`
+            Array containing image data
         '''
-        if type(imageArray) == np.ma.core.MaskedArray:
+        if type(imageArray) is np.ma.core.MaskedArray:
             data = np.zeros(imageArray.shape) + imageArray.data
             mask = np.zeros(imageArray.shape, dtype=bool) + imageArray.mask
             self.imageArray = np.ma.masked_array(data, mask=mask)
         else:
             self.imageArray = np.zeros(imageArray.shape) + imageArray
 
-    def initializeCenter(self, halfBoxWid):
+    def initializeCenter(self, halfBoxWid, cType="quadratic"):
         '''
         Makes an initial guess at the galaxy center, to be fed into photutils
         ellipse function later.
 
         Parameters
         ----------
-        halfBoxWid : int
+        halfBoxWid : `int`
             Half the full width of the central image segment to clip
+        cType : `string`
+            Type of centroid to use.  Valid choices are:
+                "quadratic", "com", "1dg", "2dg"
 
         Returns
         -------
-        newX : float
+        newX : `float`
             Initial estimate of the central x-coordinate
-        newY : float
+        newY : `float`
             Initial estimate of central y-coordinate
         '''
         cenx = self.imageArray.shape[1]//2
         ceny = self.imageArray.shape[0]//2
         cenBox = utils.imBox(halfBoxWid, cenx, ceny, self.imageArray)
-        box_x, box_y = centroids.centroid_quadratic(cenBox)
+        if cType == "quadratic":
+            box_x, box_y = centroids.centroid_quadratic(cenBox)
+        elif cType == "com":
+            box_x, box_y = centroids.centroid_com(cenBox)
+        elif cType == "1dg":
+            box_x, box_y = centroids.centroid_1dg(cenBox)
+        elif cType == "2dg":
+            box_x, box_y = centroids.centroid_2dg(cenBox)
         delta_x = box_x - cenBox.shape[1]//2
         delta_y = box_y - cenBox.shape[0]//2
 
@@ -299,7 +681,7 @@ class Profile():
 
         Returns
         -------
-        ellipse : photutils.isophote.ellipse.Ellipse
+        ellipse : `photutils.isophote.ellipse.Ellipse`
             Initialized Ellipse object, for fitting
         '''
         geom = isophote.EllipseGeometry(**kwargs)
@@ -314,19 +696,20 @@ class Profile():
 
         Parameters
         ----------
-        ellipse : photutils.isophote.ellipse.Ellipse
+        ellipse : `photutils.isophote.ellipse.Ellipse`
             Ellipse object initialized with self.initializeEllipse()
         **kwargs
             See photutils.isophote.ellipse.Ellipse() docs
 
         Returns
         -------
-        isoList : photutils.isophote.ellipse.Ellipse.isolist
+        isoList : `photutils.isophote.ellipse.Ellipse.isolist`
             Class instance containing isophotal parameters
 
+        Notes
+        -----
         To do no-fit mode, use maxrit=1 or some number smaller than your step
-        size.  Beware: also give it a maxsma, or it will take a long time to
-        run.
+        size.  Give it a maxsma value as well to shorten runtime.
         '''
         isoList = ellipse.fit_image(**kwargs)
 
@@ -338,16 +721,12 @@ class Profile():
 
         Parameters
         ----------
-        isoList : photutils.isophote.ellipse.Ellipse.isolist
+        isoList : `photutils.isophote.ellipse.Ellipse.isolist`
             Class instance containing isophotal parameters
-        vmin : float
+        vmin : `float`
             Minimum in imshow log image scaling
-        vmax : float
+        vmax : `float`
             Maximum in imshow log image scaling
-
-        Returns
-        -------
-        None.  Just makes a plot.
         '''
         logIm = utils.ds9LogScale(self.imageArray)
         plt.imshow(logIm, vmin=vmin, vmax=vmax)
@@ -358,18 +737,17 @@ class Profile():
 
     def toTable(self, isoList):
         '''
-        Because the isoList.to_table() function adds None values to some of
-        these columns, which screws everything up, we replace those with
-        some slightly more reasonable values and output a table that way.
+        Correction function to make ellipse output more machine-readable.
+        Replaces all None values within columns with concrete values.
 
         Parameters
         ----------
-        isoList : hotutils.isophote.ellipse.Ellipse.isolist
+        isoList : `photutils.isophote.ellipse.Ellipse.isolist`
             Class instance containing isophotal parameters
 
         Returns
         -------
-        isoTab : astropy.table.table.Table
+        isoTab : `astropy.table.table.Table`
             isoList converted to a table format for easier storage
         '''
         isoTab = isoList.to_table(columns='all')
@@ -399,42 +777,45 @@ def measureImageNoise(maskedImageArray,
                       galX,
                       galY,
                       galRad,
+                      nBoxes=1000,
                       halfBoxWidth=10,
                       seed=None):
     '''
-    Outputs metrics for the background noise and flux.
+    Outputs metrics for the background noise and flux for a given image.
 
     Parameters
     ----------
-    maskedImageArray : numpy.ma.core.MaskedArray
+    maskedImageArray : `numpy.ma.core.MaskedArray`
         Image with interloping sources masked
-    galX : float
+    galX : `float`
         Central x-coordinate of target galaxy
-    galY : float
+    galY : `float`
         Central y-coordinate of target galaxy
-    galRad : int
+    galRad : `int`
         Radius out to which to apply circular mask to target galaxy
-    halfBoxWidth : int, optional
-        Half the desired width of the boxes used to calculate the noise.
-        The default is 10.
-    seed : int, optional
+    nBoxes : `int`, optional
+        Number of boxes to use to measure parameters.  The default is 1000.
+    halfBoxWidth : `int`, optional
+        Half the desired width of the boxes used to calculate the noise, in px.
+        The default is 10 px.
+    seed : `int`, optional
         A seed for the random generator, for testing purposes
 
     Returns
     -------
-    avRms : float
-        The average root mean square among counts in N=1000 randomly
+    avRms : `float`
+        The average root mean square among counts in N randomly distributed
+        boxes, ignoring masked pixels
+    sbLim : `float`
+        The standard deviation of the median values within N randomly
         distributed boxes, ignoring masked pixels
-    sbLim : float
-        The standard deviation of the median values within N=1000 randomly
-        distributed boxes, ignoring masked pixels
-    sky : float
-        Median of the median values within N=1000 randomly distributed boxes,
+    sky : `float`
+        Median of the median values within N randomly distributed boxes,
         ignoring masked pixels
     '''
     rng = np.random.default_rng(seed)
-    # Need to avoiding actually altering the image and mask used
-    if type(maskedImageArray) == np.ma.core.MaskedArray:
+    # Needed to avoid actually altering the image and mask used
+    if type(maskedImageArray) is np.ma.core.MaskedArray:
         data = np.zeros(maskedImageArray.shape) + maskedImageArray.data
         mask = np.zeros(maskedImageArray.shape, dtype=bool)\
             + maskedImageArray.mask
@@ -451,11 +832,10 @@ def measureImageNoise(maskedImageArray,
     # Ignore only galaxies and other sources
     maskedImageArray.data[maskedImageArray.mask | circle_mask] = np.nan
 
-    n_boxes = 1000
     good_coords = np.where(~mask)
     rms = np.array([])
     medians = np.array([])
-    for i in range(n_boxes):
+    for i in range(nBoxes):
         idx = rng.choice(np.arange(len(good_coords[0])))
         ceny, cenx = good_coords[0][idx], good_coords[1][idx]
         box = utils.imBox(halfBoxWidth, cenx, ceny, maskedImageArray.data)
@@ -478,27 +858,31 @@ def interpolateAcrossMasks(maskedImageArray,
 
     Parameters
     ----------
-    maskedImageArray : numpy.ma.core.MaskedArray
+    maskedImageArray : `numpy.ma.core.MaskedArray`
         Image with masked pixels
-    x0 : float
+    x0 : `float`
         Central x-coordinate of galaxy in image
-    y0 : float
+    y0 : `float`
         Central y-coordinate of galaxy in image
-    maxRad : int
+    maxRad : `int`
         Maximum radius (semi-major axis) out to which to replace masks
-    pa : float
+    pa : `float`
         Galaxy average isophote shape position angle, in degrees
-    ellip : float
+    ellip : `float`
         Galaxy average isophote shape ellipticity, 1-b/a where b and a are
         semi-major and major axis lengths
-    rms : float
+    rms : `float`
         Amount of noise to add to each replacement flux value.  Added as
-        draw from standard normal N(0, rms)
+        drawn from standard normal N(0, rms)
 
     Returns
     -------
-    unmaskedImage : numpy.ndarray
+    unmaskedImage : `numpy.ndarray`
         Image with masked pixels replaced out to maxRad
+    
+    Notes
+    -----
+    This is a very crude way to do this.  Use at your own risk.
     '''
     rng = np.random.default_rng()
 

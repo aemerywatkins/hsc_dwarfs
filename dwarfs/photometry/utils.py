@@ -4,8 +4,11 @@
 Created on Fri Nov 18 14:26:51 2022
 
 @author: awatkins
+
+Utility functions.
 """
 import numpy as np
+import warnings
 
 
 def findNearest(arr, value):
@@ -14,14 +17,14 @@ def findNearest(arr, value):
 
     Parameters
     ----------
-    array : numpy.array
+    array : `numpy.array`
         Input 1-d array
-    value : float
+    value : `float`
         Value in array you want to find
 
     Returns
     -------
-    idx : int
+    idx : `int`
         Index where array value is closest to value
     '''
     arr = arr[~np.isnan(arr)]
@@ -37,12 +40,12 @@ def rootMeanSquare(arr):
 
     Parameters
     ----------
-    arr : numpy.ndarray
+    arr : `numpy.ndarray`
         The array of values for which you want the RMS
 
     Returns
     -------
-    rms : float
+    rms : `float`
         The root mean square of the array of values
     '''
     n = len(arr)
@@ -57,14 +60,14 @@ def localSlope(x, y):
 
     Parameters
     ----------
-    x : numpy.ndarray
+    x : `numpy.ndarray`
         The abscissa axis array
-    y : numpy.ndarray
+    y : `numpy.ndarray`
         The ordinate axis array
 
     Returns
     -------
-    dydx : numpy.ndarray
+    dydx : `numpy.ndarray`
         An array of slope values between x and y
     '''
     dydx = np.zeros(len(y))
@@ -81,16 +84,16 @@ def imBox(halfBoxWid, xCen, yCen, imageArray):
 
     Parameters
     ----------
-    halfBoxWid : int
+    halfBoxWid : `int`
         Half the full width of the image segment to make.
-    xCen : float
+    xCen : `float`
         Central x-coordinate where you want the box drawn
-    yCen : float
+    yCen : `float`
         Central y-coordinate where you want the box drawn
 
     Returns
     -------
-    box : numpy.ndarray
+    box : `numpy.ndarray`
         Segment of imageArray desired.
 
     '''
@@ -108,21 +111,23 @@ def imCircle(xCen, yCen, radius, imageArray):
 
     Parameters
     ----------
-    xCen : float
+    xCen : `float`
         Central x-coordinate where you want the circle selected
-    yCen : float
+    yCen : `float`
         Central y-coordinate where you want the circle selected
-    radius : float
+    radius : `float`
         Radius of the circular region, in pixels
-    imageArray : numpy.ndarray
+    imageArray : `numpy.ndarray`
         The image array from which you want to select the circle.
         NOTE: currently assumes the image has symmetric axis lengths.
 
     Returns
     -------
-    circ : numpy.ndarray
+    circ : `numpy.ndarray`
         A boolean array with the circular region selected as True
     '''
+    if imageArray.shape[0] != imageArray.shape[1]:
+        warnings.warn("Warning: image is not square, results may be off")
     cenx = int(np.round(xCen, 0))
     ceny = int(np.round(yCen, 0))
     x = np.arange(1, imageArray.shape[0]+1)
@@ -139,45 +144,50 @@ def reprojectToEllipse(imageArray, xCen, yCen, pa, ellip):
 
     Parameters
     ----------
-    imageArray : numpy.ndarray
-        NxN array of fluxes
-    xCen : float
+    imageArray : `numpy.ndarray`
+        Working image array
+    xCen : `float`
         Central x-coordinate of ellipse, in pixels
-    yCen : float
+    yCen : `float`
         Central y-coordinate of ellipse, in pixels
-    pa : float
-        Ellipse position angle in degrees
-    ellip : float
+    pa : `float`
+        Ellipse position angle in degrees (0 = positive y-axis, increase CCW)
+    ellip : `float`
         Ellipse ellipticity = 1-b/a (b is minor axis, a is major axis)
 
     Returns
     -------
-    xEll : numpy.ndarray
+    xEll : `numpy.ndarray`
         Elliptical x-axis projection
-    yEll : numpy.ndarray
+    yEll : `numpy.ndarray`
         Elliptical y-axis projection
-    ellRad : numpy.ndarray
+    ellRad : `numpy.ndarray`
         Array of radii from ellipse center, in the ellipse plane
-    theta : numpy.ndarray
+    theta : `numpy.ndarray`
         Array of angles in the ellipse plane, with 0 degrees at the top of the
         major axis, increasing CCW
-
-    To plot the reprojected image (for diagnostics), do:
-        plt.pcolormesh(xEll, yEll, imageArray)
-    Or, to show the radius array, do:
-        plt.imshow(ellRad)
+    
+    Notes
+    -----
+    xEll, yEll, and theta are primarly for diagnostic purposes
     '''
-    dim = imageArray.shape[0]  # Assumes image is NxN, not NxM
-    x = np.arange(1, dim+1)
-    y = x.reshape(-1, 1)
+    # Set up Cartesian coordinate arrays in image plane
+    # Use the longest available axis to avoid issues at image edge
+    size = np.max([imageArray.shape[0], imageArray.shape[1]])
+    x = np.arange(1, size + 1)
+    y = x.reshape(-1 ,1)
 
-    # Currently written to start at PA and increase CCW (due north is 0 deg)
-    xEll = (x - xCen)*np.cos(np.radians(pa+90)) + \
-        (y - yCen)*np.sin(np.radians(pa+90))
-    yEll = -(x - xCen)*np.sin(np.radians(pa+90)) + \
-        (y - yCen)*np.cos(np.radians(pa+90))
+    # Rotate x,y to xEll,yEll --> transpose of rotation tensor
+    # Want due-north to be PA=0, so also add 90 deg
+    xEll = (x - xCen) * np.cos(np.radians(pa + 90)) + (y - yCen) * np.sin(
+        np.radians(pa + 90)
+    )
+    yEll = -(x - xCen) * np.sin(np.radians(pa + 90)) + (
+        y - yCen
+    ) * np.cos(np.radians(pa + 90))
 
-    ellRad = np.sqrt(xEll**2 + (yEll/(1-ellip))**2)
+    # Create radius array within ellipse plane
+    ellRad = np.sqrt(xEll**2 + (yEll / (1-ellip)) ** 2)
     theta = np.arctan2(yEll, xEll)
     theta[theta < 0.] = theta[theta < 0.]+2.0*np.pi  # Removing negative values
 
@@ -187,19 +197,21 @@ def reprojectToEllipse(imageArray, xCen, yCen, pa, ellip):
 def ds9LogScale(imageArray):
     '''
     Scales an image logarithmically in the way that DS9 does, to show also
-    negative values as something other than NaNs.
+    negative values as something other than NaNs
 
     Parameters
     ----------
-    imageArray : numpy.ndarray
-        NxN array containing image flux
+    imageArray : `numpy.ndarray`
+        Working image array
 
     Returns
     -------
-    logImageArray : numpy.ndarray
+    logImageArray : `numpy.ndarray`
         imageArray scaled logarithmically, for display purposes
 
-    NOTE: for display purposes only!  Not for analysis.
+    Notes
+    -----
+    For display purposes only!  Not for analysis.
     '''
     np.seterr(all="ignore")  # Suppress warnings about negative flux
     if type(imageArray) == np.ma.core.MaskedArray:
