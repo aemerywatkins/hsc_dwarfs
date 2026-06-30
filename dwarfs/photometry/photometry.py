@@ -8,13 +8,14 @@ Created on Tue Nov 15 14:20:06 2022
 Functions for doing surface photometry on image stamps and returning derived
 parameters.
 """
+from astropy import units as u
+import matplotlib.pyplot as plt
 import numpy as np
-from scipy.interpolate import interp1d
 from photutils import centroids
 from photutils import isophote
-import matplotlib.pyplot as plt
+from scipy.interpolate import interp1d
+from scipy.special import gammaincinv
 import warnings
-# from . import utils
 import utils
 
 
@@ -99,10 +100,10 @@ class DerivedValues():
             # If difference from one radius to the next exceeds thresh, apply
             # the appropriate 180 correction
             dpa = self.isoTable["pa"][i+1] - self.isoTable["pa"][i]
-            if dpa > np.abs(thresh):
-                self.isoTable["pa"][i+1] -= 180
-            elif dpa < -np.abs(thresh):
-                self.isoTable["pa"][i+1] += 180
+            if dpa > np.abs(thresh*u.deg):
+                self.isoTable["pa"][i+1] -= 180*u.deg
+            elif dpa < -np.abs(thresh*u.deg):
+                self.isoTable["pa"][i+1] += 180*u.deg
 
     def curveOfGrowth(self):
         '''
@@ -477,10 +478,10 @@ class DerivedValues():
         '''
         innerSma /= self.pxScale  # Attached table is in pixels
         noise = np.sqrt(
-            self.isoTab["int_err"]**2
-            + (skyNoise / np.sqrt(self.isoTable["npix"]))**2
+            self.isoTable["intens_err"]**2
+            + (skyNoise / np.sqrt(self.isoTable["npix_e"]))**2
             )
-        want = (self.isoTab["sma"] >= innerSma) \
+        want = (self.isoTable["sma"] >= innerSma) \
             & (self.isoTable["intens"]/noise >= minSN)
 
         maxParam = np.nanmax(self.isoTable[param][want])
@@ -520,14 +521,14 @@ class DerivedValues():
         '''
         innerSma /= self.pxScale  # Work in pixels
         noise = np.sqrt(
-            self.isoTab["int_err"]**2
-            + (skyNoise / np.sqrt(self.isoTable["npix"]))**2
+            self.isoTable["intens_err"]**2
+            + (skyNoise / np.sqrt(self.isoTable["npix_e"]))**2
             )
-        want = (self.isoTab["sma"] >= innerSma) \
+        want = (self.isoTable["sma"] >= innerSma) \
             & (self.isoTable["intens"]/noise >= minSN) \
             & (self.isoTable["ellipticity"] >= 0.1)    # From Busko et al. 1996
 
-        self.correctPa(self.isoTable["pa"], thresh)  # Ignore 180 flips
+        self.correctPa(thresh)  # Ignore 180 flips
         maxDelPa = np.nanmax(self.isoTable["pa"][want]) \
             - np.nanmin(self.isoTable["pa"][want])
 
@@ -571,37 +572,140 @@ class DerivedValues():
         # Reject NaN values in the calculation
         # Calculate noise array for S/N cut
         noise = np.sqrt(
-            self.isoTable["int_err"]**2 
-            + (skyNoise / np.sqrt(self.isoTable["npix"]))**2
+            self.isoTable["intens_err"]**2 
+            + (skyNoise / np.sqrt(self.isoTable["npix_e"]))**2
             )
         wantRad = (self.isoTable["sma"] >= innerSma) \
-            & (self.isTable["intens"] / noise >= minSN)
-        wantFinite = np.isfinite(self.isoTab["eps"]) \
+            & (self.isoTable["intens"] / noise >= minSN)
+        wantFinite = np.isfinite(self.isoTable["ellipticity"]) \
             & np.isfinite(self.isoTable["pa"]) \
             & np.isfinite(self.isoTable["pa_err"])
-        wantPaErr = self.isoTable["eps"] >= 0.1  # From Busko et al. 1996
+        wantPaErr = self.isoTable["ellipticity"] >= 0.1  # From Busko et al. 1996
         want = wantRad & wantFinite & wantPaErr
 
-        sma = self.isoTable["sma"][want]
-        intens = self.isoTable["intens"][want]
-        ellip = self.isoTable["eps"][want]
-        pa = self.isoTable["pa"][want]
+        # TODO: bad that this currently modifies the isoTable object!
+        self.isoTable = self.isoTable[want]
     
-        q, La0, phiAv = self.lumWeight(sma, intens, ellip, pa)
+        q, La0, phiAv = self.lumWeight("pa")
 
         # Now calculating T, the twistiness parameter
-        gamma = np.radians(pa) - np.radians(phiAv)
-        dIda = np.diff(intens) / np.diff(sma)
+        gamma = np.radians(self.isoTable["pa"]) - np.radians(phiAv)
+        dIda = np.diff(self.isoTable["intens"]) / np.diff(self.isoTable["sma"])
         # My own derivation... original paper has a typo in the LaTeX file.
         quant = np.sqrt((np.sin(gamma)**2/q**2) + np.cos(gamma)**2) - 1
-        C = dIda * sma[1:] * quant[1:]
-        tInt = np.trapezoid(np.abs(C) * sma[1:], x=sma[1:])
+        C = dIda * self.isoTable["sma"][1:] * quant[1:]
+        tInt = np.trapezoid(np.abs(C) * self.isoTable["sma"][1:],
+                            x=self.isoTable["sma"][1:])
         T = ((2*np.pi)/La0) * tInt
     
         if not flag:
             return T
         else:
-            return T, np.abs(C) * sma[1:], sma[1:]
+            return T, np.abs(C) * self.isoTable["sma"][1:], \
+                self.isoTable["sma"][1:]
+    
+    def iteratedSersicIndex(self, rLow, sbLim, nMin=0.5, nMax=6.5, step=0.1):
+        '''
+        Identifies ideal Sersic index of a measured profile by finding that
+        which minimizes the chi^2 of a linear fit in r^(1/n) space
+
+        Parameters
+        ----------
+        rLow : `float`
+            Lower limit on radius for the fit, arcseconds
+        sbLim : `float`
+            Faintest surface brightness out to which to fit, in mag/arcsec^2
+        nMin : `float`
+            Lowest desired Sersic index.  The default value is 0.5.
+        nMax : `float`
+            Highest desired Sersic index.  The default value is 6.5.
+        step : `float`, optional
+            Step size in Sersic index array.  The default value is 0.1.
+
+        Returns
+        -------
+        bestN : `float`
+            The Sersic index n which minimizes the fit chi^2
+        bestMuEff : `float`
+            Effective surface brightness associated with the best fit profile,
+            mag/arcsec^2
+        bestReff : `float`
+            Half-light radius associated with the best fit profile, arcsec
+        '''
+        ns = np.arange(nMin, nMax+step, step)
+        rad = self.isoTable["sma"] * self.pxScale
+        sb = self.surfaceBrightnessProfile()
+        
+        chi2s = []
+        for n in ns:
+            x = rad**(1/n)
+            want = rad > rLow
+            want2 = sb <= sbLim
+            want = want & want2
+            fit = np.polyfit(x[want], sb[want], 1)
+            dumY = fit[0]*x + fit[1]
+            chi2 = np.sum((sb - dumY)**2/dumY)
+            chi2s.append(chi2)
+        
+        # Interpolate to a higher resolution and find the minimum
+        f = interp1d(ns, chi2s, kind="cubic")
+        dumN = np.linspace(np.min(ns), np.max(ns), 10000)
+        dumChi2 = f(dumN)
+        minIdx = np.argmin(dumChi2)
+        bestN = dumN[minIdx]
+        if minIdx == len(dumN) - 1:
+            warnings.warn("Minimum found at final index; chi^2 values likely"
+                         + " did not converge")
+
+        # Use that fit to derive the other Sersic parameters
+        x = rad**(1/bestN)
+        fit = np.polyfit(x, sb, 1)
+        bn = gammaincinv(2*bestN, 0.5)
+        A = 2.5*bn/np.log(10)
+        bestMuEff = fit[1] + A
+        bestReff = (A/fit[0])**bestN
+        
+        return bestN, bestMuEff, bestReff
+
+    def singleSersicResiduals(self, n, muEff, rEff, rLow, sbLim):
+        '''
+        Derive mean residual sum of squares from best-fit single-Sersic profile
+
+        Parameters
+        ----------
+        n : `float`
+            Sersic index
+        muEff : `float`
+            Effective surface brightness, mag/arcsec^2
+        rEff : `float`
+            Half-light radius, arcsec
+        rLow : `float`
+            Lower limit on radius for the fit, arcseconds
+        sbLim : `float`
+            Faintest surface brightness out to which to fit, in mag/arcsec^2
+
+        Returns
+        -------
+        sRes : `float`
+            Sum of squares of residuals of surface brightness profile from its
+            best-fit single-Sersic model
+            
+        Notes
+        -----
+        Reference: Barazza et al. (2003), A&A, 427, 121
+        '''
+        rad = self.isoTable["sma"] * self.pxScale
+        sb = self.surfaceBrightnessProfile()
+        
+        want = (rad >= rLow) & (sb <= sbLim)
+    
+        bn = gammaincinv(2*n, 0.5)
+        muR = muEff + ((2.5*bn)/np.log(10)) * ((rad/rEff)**(1/n) - 1)
+        res = sb - muR
+        
+        sRes = np.sqrt(np.sum(res[want]**2) / len(res[want]))
+        
+        return sRes
 
 
 class Profile():
@@ -842,9 +946,9 @@ def measureImageNoise(maskedImageArray,
         rms = np.append(rms, utils.rootMeanSquare(box[np.isfinite(box)]))
         medians = np.append(medians, np.nanmedian(box))
 
-    avRms = np.mean(rms)
-    sbLim = np.std(medians)
-    sky = np.median(medians)
+    avRms = np.nanmean(rms)
+    sbLim = np.nanstd(medians)
+    sky = np.nanmedian(medians)
 
     return avRms, sbLim, sky
 
